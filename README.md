@@ -1,5 +1,50 @@
 # Paraformer: Updating Large-scale High-resolution Geographical Maps from Limited Historical Labels
 
+## File guide
+
+This branch adds DINOv3 and Pixio backbones, checkpoint evaluation, result collection, and comparison figures to the original Paraformer code.
+
+### Training and model files
+
+| File | What it does |
+| --- | --- |
+| [train.py](train.py) | Starts training from a dataset CSV. Selects the original ViT-B/16 or a DINOv3/Pixio backbone, optimizer, backbone freezing, and chips sampled per tile. |
+| [trainer.py](trainer.py) | Streams image tiles, samples training chips, computes the two branch losses, and runs optimization. Handles invalid labels and non-finite losses, logs training progress, and saves checkpoints. |
+| [utils.py](utils.py) | Defines image normalization, NLCD class indices, and label colors. Maps unknown uint8 label values to the ignored class. |
+| [networks/paraformer_dinov3.py](networks/paraformer_dinov3.py) | Implements Paraformer with DINOv3 satellite/web or Pixio backbones alongside the four-band CNN branch. Handles RGB normalization and optional backbone freezing. |
+| [networks/vit_seg_modeling.py](networks/vit_seg_modeling.py) | Implements the original ViT branch, shared decoder, segmentation heads, and pretrained ViT weight loading. |
+| [networks/vit_seg_modeling_L2HNet.py](networks/vit_seg_modeling_L2HNet.py) | Implements the L2HNet CNN branch and its multiscale features. |
+| [networks/vit_seg_configs.py](networks/vit_seg_configs.py) | Defines ViT-B/16 and testing configurations. |
+
+### Evaluation, results, and figures
+
+| File | What it does |
+| --- | --- |
+| [test.py](test.py) | Runs the original ViT-B/16 sliding-window inference workflow and writes prediction rasters. |
+| [evaluate.py](evaluate.py) | Evaluates a checkpoint against CCLC ground truth using four unified classes. Saves raw counts, per-tile CSV scores, and JSON results; optionally saves prediction GeoTIFFs or downsampled PNGs. |
+| [eval_metrics.py](eval_metrics.py) | Provides the `paper` and `legacy` class mappings, confusion matrices, class IoU, mIoU, and overall accuracy. Computes per-state, mean-over-states, and pooled results. |
+| [rescore.py](rescore.py) | Recomputes metrics from saved `raw_counts.npz` without model inference. Prints results by default; `--write` updates the JSON and per-tile CSV files. |
+| [append_history.py](append_history.py) | Adds checkpoint results to a history CSV. Replaces an existing row for the same epoch and class mapping. |
+| [collect_results.py](collect_results.py) | Combines test histories using the `paper` mapping for the baseline and two DINOv3 runs into `runs/test_results_tableS1.csv`. |
+| [make_test_figures.py](make_test_figures.py) | Creates side-by-side RGB, ground-truth, and three-model prediction figures for a chosen epoch. Writes per-tile images and an overview with one representative tile per state. Requires predictions saved with `evaluate.py --save_png 4`. |
+
+### Shell workflows
+
+| File | What it does |
+| --- | --- |
+| [eval_latest.sh](eval_latest.sh) | Copies `latest.pth` to a temporary snapshot, evaluates validation and test sets on GPUs 1 and 2, updates their histories, and removes the snapshot. Accepts a run directory and backbone. |
+| [eval_epoch_all.sh](eval_epoch_all.sh) | Evaluates one supplied epoch for the baseline and two DINOv3 runs on GPUs 0–2. Saves downsampled prediction PNGs and updates test histories. |
+| [eval_all_epochs_gpu0.sh](eval_all_epochs_gpu0.sh) | Queues epochs 0, 10, ..., 90, and 99 for all three runs sequentially on GPU 0. Waits for checkpoints, skips recorded `paper` results, updates the combined CSV, and invokes slide generation. |
+| [rescore_paper_all.sh](rescore_paper_all.sh) | Runs a predefined set of checkpoint evaluations with the `paper` mapping across GPUs 0–3 and updates histories. Re-runs inference through `evaluate.py`; epoch-50 jobs also save PNGs. |
+| [after_rescore.sh](after_rescore.sh) | Waits for the rescore log to report completion, then rebuilds epoch-50 comparison figures and invokes slide generation. |
+| [pixio_smoke.sh](pixio_smoke.sh) | Waits for access to the gated Pixio model, checks weight loading, trains for one epoch on a small dataset, and evaluates one test tile. Removes smoke-test checkpoints and keeps logs. |
+
+Typical workflow: `train.py` → `evaluate.py` → `append_history.py` → `collect_results.py`. Use `make_test_figures.py` after saving prediction PNGs, or `rescore.py` to change the evaluation mapping without repeating inference.
+
+The shell workflows contain machine-specific project paths, Python environment paths, run names, and GPU assignments; edit these for your setup. The slide-generation steps call `../make_slides.py`, which is outside this repository. Dataset CSVs and generated `runs/` outputs are kept locally and are not included in this branch's changes.
+
+## Project overview
+
 Large-scale high-resolution (HR) mapping is a vital task to survey the Earth's surface and resolve many challenges facing humanity. 
 However, it is still a non-trivial task hindered by complex ground details, various landforms, and the scarcity of accurate training labels over a wide-span geographic area. 
 To address these limitations, we propose an efficient, weakly supervised framework (Paraformer), a.k.a Low-to-High Network (L2HNet) v2, to guide large-scale HR mapping with easy-access annotation data, e.g., historical map at a low resolution or Volunteer Geographic Information data. 🌟:**Currently, the framework supports mappings of land cover, land use, and building function**.
