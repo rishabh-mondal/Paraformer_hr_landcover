@@ -19,6 +19,11 @@ parser.add_argument('--seed', type=int, default=1234, help='random seed')
 parser.add_argument('--CNN_width', type=int, default=64, help='L2HNet_width_size, default is 64: light mode. Set to 128: normal mode')
 parser.add_argument('--savepath', type=str)
 parser.add_argument('--gpu', type=str, help='Select GPU number to train' )
+parser.add_argument('--list_dir', type=str, default='./dataset/CSV_list/Chesapeake_all_train.csv', help='CSV with image_fn,label_fn columns')
+parser.add_argument('--optimizer', type=str, default='adamw', choices=['adamw', 'sgd'], help="'adamw' = paper setting (AdamW, lr drops 10%% after 8 stalled epochs); 'sgd' = original repo code")
+parser.add_argument('--backbone', type=str, default='vit_b16', help="'vit_b16' = original ImageNet-21k ViT-B/16; 'dinov3_sat' / 'dinov3_web' or any HF DINOv3 id")
+parser.add_argument('--freeze_backbone', action='store_true', help='freeze the DINOv3 ViT (CNN branch, decoder and heads still train)')
+parser.add_argument('--num_chips_per_tile', type=int, default=50, help='random 224x224 chips sampled per tile per epoch')
 args = parser.parse_args()
 
 os.environ["CUDA_VISIBLE_DEVICES"] = args.gpu
@@ -34,7 +39,7 @@ if __name__ == "__main__":
     dataset_name = args.dataset
     dataset_config = {
         'Chesapeake': {  # default dataset as a example
-            'list_dir': '/home/ashelee/project_TransUNet/list/NY_raw.csv', # The path of the *.csv file
+            'list_dir': args.list_dir,
             'num_classes': 17
         }
     }# Create a config to your own dataset here
@@ -46,9 +51,15 @@ if __name__ == "__main__":
     snapshot_path = args.savepath 
     if not os.path.exists(snapshot_path):
         os.makedirs(snapshot_path)
-    config_vit = CONFIGS_ViT_seg["ViT-B_16"]
-    config_vit.n_classes = args.num_classes
-    config_vit.patches.grid = (int(img_size / vit_patches_size), int(img_size / vit_patches_size))
-    net = ViT_seg(config_vit, backbone=L2HNet(width=args.CNN_width),img_size=img_size, num_classes=config_vit.n_classes).cuda()
-    net.load_from(weights=np.load(config_vit.pretrained_path))
+    if args.backbone == 'vit_b16':
+        config_vit = CONFIGS_ViT_seg["ViT-B_16"]
+        config_vit.n_classes = args.num_classes
+        config_vit.patches.grid = (int(img_size / vit_patches_size), int(img_size / vit_patches_size))
+        net = ViT_seg(config_vit, backbone=L2HNet(width=args.CNN_width),img_size=img_size, num_classes=config_vit.n_classes).cuda()
+        net.load_from(weights=np.load(config_vit.pretrained_path))
+    else:
+        from networks.paraformer_dinov3 import ParaformerDINOv3
+        net = ParaformerDINOv3(backbone=args.backbone, cnn_width=args.CNN_width, num_classes=args.num_classes,
+                               freeze_backbone=args.freeze_backbone).cuda()
+    print("trainable params: %.1fM / %.1fM" % (sum(p.numel() for p in net.parameters() if p.requires_grad)/1e6, sum(p.numel() for p in net.parameters())/1e6))
     trainer_dataset(args, net, snapshot_path)

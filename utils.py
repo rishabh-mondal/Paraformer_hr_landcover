@@ -30,7 +30,7 @@ LABEL_IDX_COLORMAP = {
 def get_label_class_to_idx_map():
     label_to_idx_map = []
     idx = 0
-    for i in range(LABEL_CLASSES[-1]+1):
+    for i in range(256):  # full uint8 range; any non-NLCD value (e.g. 128 fill in wv m_3807809_ne) -> 0 = ignored
         if i in LABEL_CLASSES:
             label_to_idx_map.append(idx)
             idx += 1

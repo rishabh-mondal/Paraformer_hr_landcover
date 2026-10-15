@@ -191,7 +191,9 @@ def label_transforms(labels):
     labels = torch.from_numpy(labels)
     return labels
 def nodata_check(img, labels):
-    return np.any(labels == 0) or np.any(np.sum(img == 0, axis=2) == 4)
+    # skip a chip if any label pixel is nodata (0) or NOT an NLCD class (e.g. the 128 fill in wv m_3807809_ne, which the
+    # lookup table would map to 0 -> a whole batch of such chips gives an all-ignored CE = NaN loss)
+    return np.any(utils.LABEL_CLASS_TO_IDX_MAP[labels] == 0) or np.any(np.sum(img == 0, axis=2) == 4)
 
 def trainer_dataset(args, model, snapshot_path):
     logging.basicConfig(filename=snapshot_path + "/log.txt", level=logging.INFO,
@@ -208,7 +210,7 @@ def trainer_dataset(args, model, snapshot_path):
     input_dataframe = pd.read_csv(args.list_dir)
     image_fns = input_dataframe["image_fn"].values
     label_fns = input_dataframe["label_fn"].values
-    NUM_CHIPS_PER_TILE =50  # How many chips will be sampled from one large-scale tile 
+    NUM_CHIPS_PER_TILE = args.num_chips_per_tile  # How many chips will be sampled from one large-scale tile 
     CHIP_SIZE = 224 # Size of each sampled chip
     db_train = StreamingGeospatialDataset(
         imagery_fns=image_fns, label_fns=label_fns, groups=None, chip_size=CHIP_SIZE, num_chips_per_tile=NUM_CHIPS_PER_TILE, windowed_sampling=True, verbose=False,
@@ -224,7 +226,12 @@ def trainer_dataset(args, model, snapshot_path):
                              worker_init_fn=worker_init_fn)
     model.train()
     ce_loss = CrossEntropyLoss(ignore_index=0)
-    optimizer = optim.SGD(model.parameters(), lr=base_lr, momentum=0.9, weight_decay=0.0001)
+    if args.optimizer == 'adamw':   # paper (Sec. 4.2): AdamW, lr 0.01, decrease by 10% when loss stops dropping for 8 epochs
+        optimizer = optim.AdamW([p for p in model.parameters() if p.requires_grad], lr=base_lr, weight_decay=0.0001)
+        scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.9, patience=8)
+    else:                          # original released code: SGD + polynomial decay
+        optimizer = optim.SGD([p for p in model.parameters() if p.requires_grad], lr=base_lr, momentum=0.9, weight_decay=0.0001)
+        scheduler = None
     writer = SummaryWriter(snapshot_path + '/log')
     iter_num = 0
     max_epoch = args.max_epochs
@@ -244,20 +251,30 @@ def trainer_dataset(args, model, snapshot_path):
             loss_ce1 = ce_loss(outputs1, label_batch[:].long()) # General CE loss for CNN branch
             loss_ce2 = ce_loss(outputs2, mask_output[:].long()) # Mask CE (mce) loss for ViT branch
             loss=0.5*loss_ce1+0.5*loss_ce2
+            if not torch.isfinite(loss):
+                logging.warning('non-finite loss at iter %d (ce1=%s, mce2=%s) - batch skipped' % (iter_num, loss_ce1.item(), loss_ce2.item()))
+                optimizer.zero_grad(); iter_num += 1
+                continue
 
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
-            lr_ = base_lr * (1.0 - iter_num / max_iterations) ** 0.9
-            for param_group in optimizer.param_groups:
-                param_group['lr'] = lr_
+            if scheduler is None:
+                lr_ = base_lr * (1.0 - iter_num / max_iterations) ** 0.9
+                for param_group in optimizer.param_groups:
+                    param_group['lr'] = lr_
             loss1.append(loss_ce1.item())
             loss2.append(loss_ce2.item())
             iter_num = iter_num + 1
         avg_loss1 = np.mean(loss1)
         avg_loss2=np.mean(loss2)
-        logging.info('Epoch : %d, CE-branch1 : %f, MCE-branch2: %f, loss: %f' % (epoch_num, avg_loss1, avg_loss2, avg_loss1*0.5+avg_loss2*0.5))
-        save_interval = 20 
+        epoch_loss = avg_loss1*0.5+avg_loss2*0.5
+        if scheduler is not None:
+            scheduler.step(epoch_loss)
+        logging.info('Epoch : %d, CE-branch1 : %f, MCE-branch2: %f, loss: %f, lr: %g' % (epoch_num, avg_loss1, avg_loss2, epoch_loss, optimizer.param_groups[0]['lr']))
+        writer.add_scalar('loss/epoch', epoch_loss, epoch_num); writer.add_scalar('lr', optimizer.param_groups[0]['lr'], epoch_num)
+        torch.save(model.state_dict(), os.path.join(snapshot_path, 'latest.pth'))   # overwritten every epoch
+        save_interval = 10
         if epoch_num  % save_interval == 0:
             save_mode_path = os.path.join(snapshot_path, 'epoch_' + str(epoch_num) + '.pth')
             torch.save(model.state_dict(), save_mode_path)
